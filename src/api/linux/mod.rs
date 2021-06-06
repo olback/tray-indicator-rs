@@ -1,53 +1,119 @@
-use crate::TIError;
-use gtk::prelude::*;
-use libappindicator::{AppIndicator, AppIndicatorStatus};
+use crate::{TIError, IconSource};
+use ksni::{menu::StandardItem, Handle, Icon};
+use std::sync::Arc;
+
+struct TrayItem {
+    label: String,
+    action: Option<Arc<dyn Fn() + Send + Sync + 'static>>
+}
+
+struct Tray {
+    title: String,
+    icon: IconSource,
+    actions: Vec<TrayItem>
+}
 
 pub struct TrayItemLinux {
-    tray: AppIndicator,
-    menu: gtk::Menu,
+    tray: Handle<Tray>
+}
+
+impl ksni::Tray for Tray {
+    fn title(&self) -> String {
+        self.title.clone()
+    }
+
+    fn icon_name(&self) -> String {
+        match &self.icon {
+            IconSource::Resource(name) => name.to_string(),
+            IconSource::Data{..} => String::new(),
+        }
+    }
+
+    fn icon_pixmap(&self) -> Vec<Icon> {
+        match &self.icon {
+            IconSource::Resource(_) => vec![],
+            IconSource::Data{data, height, width} => {
+                vec![Icon {
+                    width: *height,
+                    height: *width,
+                    data: data.clone()
+                }]
+            },
+        }
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        self.actions.iter().map(|item| {
+            let action = item.action.clone();
+            if let Some(action) = action {
+                StandardItem {
+                    label: item.label.clone(),
+                    activate: Box::new(move |_| {
+                        action();
+                    }),
+                    ..Default::default()
+                }
+                .into()
+            } else {
+                StandardItem {
+                    label: item.label.clone(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into()
+            }
+        }).collect()
+    }
 }
 
 impl TrayItemLinux {
-    pub fn new(title: &str, icon: &str) -> Result<Self, TIError> {
-        let mut t = Self {
-            tray: AppIndicator::new(title, icon),
-            menu: gtk::Menu::new(),
-        };
+    pub fn new(title: &str, icon: IconSource) -> Result<Self, TIError> {
+        let svc = ksni::TrayService::new(Tray {
+            title: title.to_string(),
+            icon,
+            actions: vec![]
+        });
 
-        t.set_icon(icon)?;
+        let handle = svc.handle();
+        svc.spawn();
 
-        Ok(t)
+        Ok(Self {
+            tray: handle
+        })
     }
 
-    pub fn set_icon(&mut self, icon: &str) -> Result<(), TIError> {
-        self.tray.set_icon(icon);
-        self.tray.set_status(AppIndicatorStatus::Active);
+    pub fn set_icon(&mut self, icon: IconSource) -> Result<(), TIError> {
+        self.tray.update(|tray| {
+            tray.icon = icon.clone()
+        });
 
         Ok(())
     }
 
     pub fn add_label(&mut self, label: &str) -> Result<(), TIError> {
-        let item = gtk::MenuItem::with_label(label.as_ref());
-        item.set_sensitive(false);
-        self.menu.append(&item);
-        self.menu.show_all();
-        self.tray.set_menu(&mut self.menu);
+        self.tray.update(move |tray| {
+            tray.actions.push(TrayItem {
+                label: label.to_string(),
+                action: None
+            });
+        });
 
         Ok(())
     }
 
     pub fn add_menu_item<F>(&mut self, label: &str, cb: F) -> Result<(), TIError>
-    where
-        F: Fn() -> () + Send + Sync + 'static,
+        where F: Fn() -> () + Send + Sync + 'static,
     {
-        let item = gtk::MenuItem::with_label(label.as_ref());
-        item.connect_activate(move |_| {
+        let action = Arc::new(move ||{
             cb();
         });
-        self.menu.append(&item);
-        self.menu.show_all();
-        self.tray.set_menu(&mut self.menu);
 
+        self.tray.update(move |tray| {
+            tray.actions.push(TrayItem {
+                label: label.to_string(),
+                action: Some(action.clone())
+            });
+        });
         Ok(())
     }
 }
